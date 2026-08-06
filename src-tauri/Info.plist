@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Meeting Copilot 仅在您授权并开始采集后使用麦克风进行实时转写；应用默认不保存原始音频。</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Meeting Copilot 仅在您授权并开始采集后获取会议系统音频进行实时转写；应用默认不保存原始音频。</string>
+</dict>
+</plist>

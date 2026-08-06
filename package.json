@@ -1,0 +1,27 @@
+{
+  "name": "meeting-copilot",
+  "private": true,
+  "version": "0.1.8",
+  "type": "module",
+  "scripts": {
+    "build:native-bridges": "bash scripts/build-native-bridge.sh",
+    "dev": "npm run build:native-bridges && vite",
+    "build": "npm run build:native-bridges && tsc -b && vite build",
+    "preview": "vite preview",
+    "tauri": "npx --yes --package @tauri-apps/cli@2.11.4 tauri"
+  },
+  "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
+    "@tauri-apps/api": "^2.8.0",
+    "@tauri-apps/plugin-dialog": "^2.2.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}
