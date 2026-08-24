@@ -1,7 +1,7 @@
 {
   "name": "meeting-copilot",
   "private": true,
-  "version": "0.1.8",
+  "version": "0.2.2",
   "type": "module",
   "scripts": {
     "build:native-bridges": "bash scripts/build-native-bridge.sh",

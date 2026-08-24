@@ -1,17 +1,24 @@
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import {
+  ArrowLeft,
+  ArrowRight,
   BookOpenText,
   ChatsCircle,
   ChartLineUp,
   CheckCircle,
   CircleNotch,
   Clock,
+  CornersIn,
+  CornersOut,
+  DownloadSimple,
+  FileText,
   GearSix,
   Lightbulb,
   Microphone,
   Moon,
   PaperPlaneTilt,
   Play,
+  Plus,
   ShieldCheck,
   Sparkle,
   Stop,
@@ -21,12 +28,15 @@ import {
 } from "@phosphor-icons/react";
 import {
   deleteDocument,
+  deleteMeetingRecord,
+  exportMarkdown,
   generateAnswer,
   getModelInvocations,
   getSnapshot,
   importDocuments,
   listenToEvents,
   listenToTranscriptEvents,
+  prefetchQuestion,
   rebuildDocument,
   requestCapturePermissions,
   saveMeetingRecord,
@@ -46,6 +56,7 @@ import type {
   KnowledgeDocument,
   MeetingRecord,
   ModelInvocation,
+  QuestionPrefetch,
   TranscriptSegment,
   TranscriptStreamEvent,
   Workspace,
@@ -80,34 +91,45 @@ type ProviderForm = {
 
 type Theme = "dark" | "light";
 type ProviderFeedback = { tone: "idle" | "pending" | "success" | "error"; message: string };
+type AudioHealth = { frames: number; seconds: number; state: "idle" | "starting" | "healthy" | "changed" };
 
 const demoTranscript: TranscriptSegment[] = [
-  { id: "t1", sessionId: "demo", speaker: "remote", speakerLabel: "远端发言人 A", text: "你能介绍一下在企业 AI 解决方案项目中，你具体负责的工作吗？", isFinal: true, isQuestionCandidate: true, startedAt: "10:24:15" },
-  { id: "t2", sessionId: "demo", speaker: "self", speakerLabel: "答题者", text: "可以，我先从客户问题和我的职责开始说明。", isFinal: true, isQuestionCandidate: false, startedAt: "10:24:21" },
-  { id: "t3", sessionId: "demo", speaker: "remote", speakerLabel: "远端发言人 B", text: "也请具体说明你如何控制模型回答的准确性。", isFinal: true, isQuestionCandidate: true, startedAt: "10:25:08" },
+  { id: "t1", sessionId: "demo", speaker: "remote", speakerLabel: "远端发言人 A", text: "这套智能客服平台的整体架构是什么？", isFinal: true, isQuestionCandidate: true, startedAt: "10:24:15" },
+  { id: "t2", sessionId: "demo", speaker: "self", speakerLabel: "本机发言", text: "我先从业务接入、知识检索和受控生成三个部分说明。", isFinal: true, isQuestionCandidate: false, startedAt: "10:24:21" },
+  { id: "t3", sessionId: "demo", speaker: "remote", speakerLabel: "远端发言人 B", text: "私有化部署和现有系统对接如何处理？", isFinal: true, isQuestionCandidate: true, startedAt: "10:25:08" },
 ];
 
 const initialAnswer: Answer = {
   id: "preview",
-  question: "你能介绍一下在企业 AI 解决方案项目中，你具体负责的工作吗？",
+  question: "这套智能客服平台的整体架构是什么？",
   status: "complete",
-  content: "可以。这个示例项目的核心是将已有业务资料、接口能力和模型服务整合成可供一线人员使用的 AI 助手。\n\n在此类项目中，可以从三部分说明职责：第一，和业务及技术团队梳理真实使用场景、资料范围和验收口径；第二，设计知识检索、模型调用和权限边界，并协调供应商完成方案验证；第三，通过问题集和异常案例持续检查回答是否有来源、是否超出已确认能力。对于尚未确认的接口、数据权限或量化效果，应明确标为待确认，而不是直接写进承诺。",
+  content: "建议按“渠道接入、智能服务、运营治理”三层说明。前端可接入 App、网页、微信等客户触点；中间层通过意图识别、知识检索和受控大模型生成回答；后端对接券商现有账户、业务办理和工单等系统，并通过知识运营、质检和人工兜底保证回答可追溯。\n\n对于私有化部署、数据驻留、并发规模和具体系统接口，应结合贵司现网架构、数据范围及安全要求进一步确认后再形成实施方案。",
   citations: [
-    { documentId: "project", documentName: "企业 AI 方案案例示例.md", locator: "项目案例 / 职责范围", excerpt: "负责业务场景梳理、供应商协同、方案验证及模型回答质量控制。", score: 0.94 },
-    { documentId: "cv", documentName: "候选人项目经历示例.pdf", locator: "项目经历示例", excerpt: "参与企业客户的 AI 解决方案设计与跨团队协同。", score: 0.81 },
+    { documentId: "case", documentName: "AI解决方案与案例.pptx", locator: "方案架构 / 智能客服平台", excerpt: "通过渠道接入、知识检索、模型服务与运营治理构成受控闭环。", score: 0.94 },
+    { documentId: "proposal", documentName: "客户需求与交流纪要.docx", locator: "部署与集成要求", excerpt: "私有化部署、数据边界与业务系统接口需在需求澄清后确认。", score: 0.81 },
   ],
   startedAt: "10:24:16",
   firstTokenMs: 1640,
   retrievalMs: 218,
 };
 
+const idleAnswer: Answer = {
+  id: "idle",
+  question: "",
+  status: "idle",
+  content: "",
+  citations: [],
+  startedAt: "",
+};
+
 const viewItems: Array<{ id: AppView; label: string; short: string }> = [
   { id: "live", label: "实时助手", short: "01" },
   { id: "knowledge", label: "知识库", short: "02" },
   { id: "profiles", label: "回答风格", short: "03" },
-  { id: "history", label: "会话记录", short: "04" },
-  { id: "observability", label: "可观测性", short: "05" },
-  { id: "settings", label: "设置与隐私", short: "06" },
+  { id: "history", label: "会议", short: "04" },
+  { id: "review", label: "深度复盘", short: "05" },
+  { id: "observability", label: "可观测性", short: "06" },
+  { id: "settings", label: "设置与隐私", short: "07" },
 ];
 
 function initialTheme(): Theme {
@@ -121,6 +143,7 @@ function NavigationIcon({ view }: { view: AppView }) {
   if (view === "knowledge") return <BookOpenText {...props} />;
   if (view === "profiles") return <Lightbulb {...props} />;
   if (view === "history") return <Clock {...props} />;
+  if (view === "review") return <FileText {...props} />;
   if (view === "observability") return <ChartLineUp {...props} />;
   return <GearSix {...props} />;
 }
@@ -134,19 +157,19 @@ function formatStatus(status: KnowledgeDocument["status"]): string {
 
 function outputTitle(profile?: AnswerProfile): string {
   if (!profile) return "未选择回答风格";
-  if (profile.style === "star") return "面试回答建议";
   if (profile.style === "business") return "商务会议建议";
   return "简洁回答建议";
 }
 
 export default function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(initialSnapshot);
-  const [activeWorkspaceId, setActiveWorkspaceId] = useState("interview");
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState("business");
   const [activeMeetingId, setActiveMeetingId] = useState("");
   const [activeView, setActiveView] = useState<AppView>("live");
   const [activeProfileId, setActiveProfileId] = useState("");
   const [question, setQuestion] = useState("");
-  const [answer, setAnswer] = useState<Answer>(initialAnswer);
+  const [questionPrefetch, setQuestionPrefetch] = useState<QuestionPrefetch | null>(null);
+  const [answer, setAnswer] = useState<Answer>(() => usingTauri() ? idleAnswer : initialAnswer);
   const [expandedSources, setExpandedSources] = useState(false);
   const [notice, setNotice] = useState("正在加载本地工作区…");
   const [isCapturing, setIsCapturing] = useState(false);
@@ -158,6 +181,10 @@ export default function App() {
   const [modelInvocations, setModelInvocations] = useState<ModelInvocation[]>([]);
   const [isRefreshingObservability, setIsRefreshingObservability] = useState(false);
   const [transcripts, setTranscripts] = useState<TranscriptSegment[]>(() => usingTauri() ? [] : demoTranscript);
+  const [audioHealth, setAudioHealth] = useState<Record<"microphone" | "system", AudioHealth>>({
+    microphone: { frames: 0, seconds: 0, state: "idle" },
+    system: { frames: 0, seconds: 0, state: "idle" },
+  });
   const [providerFeedback, setProviderFeedback] = useState<ProviderFeedback>({ tone: "idle", message: "" });
   const [providerForm, setProviderForm] = useState<ProviderForm>({
     tencentAppId: "",
@@ -173,9 +200,13 @@ export default function App() {
   });
   const [theme, setTheme] = useState<Theme>(initialTheme);
 
+  const workspaces = useMemo(
+    () => snapshot.workspaces.filter((workspace) => workspace.kind === "business"),
+    [snapshot.workspaces],
+  );
   const activeWorkspace = useMemo<Workspace | undefined>(
-    () => snapshot.workspaces.find((workspace) => workspace.id === activeWorkspaceId),
-    [activeWorkspaceId, snapshot.workspaces],
+    () => workspaces.find((workspace) => workspace.id === activeWorkspaceId),
+    [activeWorkspaceId, workspaces],
   );
   const profiles = useMemo(
     () => snapshot.profiles.filter((profile) => profile.workspaceId === activeWorkspaceId),
@@ -212,7 +243,7 @@ export default function App() {
           chatModel: data.providerSettings.chatModel,
           ocrModel: data.providerSettings.ocrModel,
         }));
-        const first = data.workspaces[0];
+        const first = data.workspaces.find((workspace) => workspace.kind === "business");
         if (first) setActiveWorkspaceId(first.id);
         setActiveProfileId(data.profiles.find((profile) => profile.workspaceId === first?.id)?.id || "");
         setActiveMeetingId(data.meetingRecords.find((record) => record.workspaceId === first?.id)?.id || "");
@@ -247,7 +278,7 @@ export default function App() {
       unlisten = dispose;
     });
     return () => unlisten();
-  }, []);
+  }, [activeMeetingId, activeWorkspaceId]);
 
   useEffect(() => {
     if (profiles.length && !profiles.some((profile) => profile.id === activeProfileId)) {
@@ -299,7 +330,28 @@ export default function App() {
       return;
     }
     if (event.status === "capture-started") {
+      setAudioHealth((current) => ({ ...current, [event.source]: { ...current[event.source], state: "starting" } }));
       setNotice(event.source === "microphone" ? "本机麦克风采集已启动，正在等待第一段语音…" : "系统音频采集已启动，正在等待会议声音…");
+      return;
+    }
+    if (event.status === "audio-healthy") {
+      setAudioHealth((current) => ({
+        ...current,
+        [event.source]: {
+          frames: event.audioFrames || current[event.source].frames,
+          seconds: event.audioSeconds || current[event.source].seconds,
+          state: "healthy",
+        },
+      }));
+      return;
+    }
+    if (event.status === "device-changed") {
+      setAudioHealth((current) => ({ ...current, [event.source]: { ...current[event.source], state: "changed" } }));
+      setNotice("检测到麦克风设备或音频格式变化；如转写中断，请暂停后重新开始采集。");
+      return;
+    }
+    if (event.status === "bridge-released") {
+      setNotice("音频桥接已释放，macOS 系统共享状态将同步关闭。");
       return;
     }
     if (!event.text) return;
@@ -308,7 +360,7 @@ export default function App() {
       id: event.id,
       sessionId: "live",
       speaker,
-      speakerLabel: speaker === "self" ? "答题者（本机麦克风）" : "远端会议音频",
+      speakerLabel: speaker === "self" ? "本机发言（麦克风）" : "远端会议音频",
       text: event.text,
       isFinal: event.isFinal,
       isQuestionCandidate: event.isQuestionCandidate,
@@ -319,16 +371,43 @@ export default function App() {
       if (index < 0) return [...current.slice(-39), segment];
       return current.map((item, itemIndex) => itemIndex === index ? { ...item, ...segment, startedAt: item.startedAt } : item);
     });
-    if (event.isFinal && event.isQuestionCandidate) {
-      setQuestion(event.text);
-      setNotice("已检测到疑似问题，已填入“当前问题”；确认后可生成回答。");
+    if (event.source === "system" && event.isFinal && event.isQuestionCandidate) {
+      beginCandidatePrefetch(event.text);
     }
   }
 
+  function beginCandidatePrefetch(text: string) {
+    const cleaned = text.trim();
+    if (!cleaned) return;
+    setQuestion(cleaned);
+    const candidate: QuestionPrefetch = {
+      id: "",
+      question: cleaned,
+      status: "prefetching",
+      evidenceCount: 0,
+      retrievalMs: 0,
+      citations: [],
+    };
+    setQuestionPrefetch(candidate);
+    setNotice("已选择疑似问题，正在本次会议资料范围内预检索；不会自动生成回答。");
+    void prefetchQuestion(activeWorkspaceId, cleaned, activeMeetingId || undefined)
+      .then((result) => {
+        setQuestionPrefetch((current) => current?.question === result.question ? result : current);
+        setNotice(result.status === "ready"
+          ? `候选预检索完成：找到 ${result.evidenceCount} 条依据，请确认是否生成回答。`
+          : "候选预检索完成，但本次资料范围没有足够依据；确认后将给出缺少依据提示。");
+      })
+      .catch((error) => {
+        const message = readableError(error);
+        setQuestionPrefetch((current) => current && current.question === cleaned
+          ? { ...current, status: "failed", error: message }
+          : current);
+        setNotice("候选预检索失败：" + message);
+      });
+  }
+
   function runDemoAnswer(text: string) {
-    const sample = activeWorkspace?.kind === "business"
-      ? "建议先确认客户的业务目标、数据边界和现有系统接口。基于当前资料，可以说明我们会以知识检索、模型编排和人工确认组成受控闭环；涉及并发、数据驻留、SLA 或接口改造的具体承诺，应在客户需求澄清后确认。"
-      : "可以先用一句结论回答：我负责把业务问题拆成可验证的方案路径，并推动资料、模型和交付团队形成闭环。随后按场景、具体职责、验证方法和结果展开；没有来源支持的具体数据不应补写。";
+    const sample = "建议先确认客户的业务目标、数据边界和现有系统接口。基于当前资料，可以说明我们会以知识检索、模型编排和人工确认组成受控闭环；涉及并发、数据驻留、SLA 或接口改造的具体承诺，应在客户需求澄清后确认。";
     const next: Answer = {
       id: "demo-answer-" + Date.now(),
       question: text,
@@ -353,7 +432,7 @@ export default function App() {
     });
   }
 
-  async function submitQuestion(text = question) {
+  async function submitQuestion(text = question, requestedPrefetchId?: string) {
     const cleaned = text.trim();
     if (!cleaned || !activeWorkspace || !activeProfile) {
       setNotice("请输入问题并选择回答风格。");
@@ -361,12 +440,17 @@ export default function App() {
     }
     setIsGenerating(true);
     setExpandedSources(false);
+    setAnswer((current) => ({ ...current, question: cleaned, error: undefined }));
+    const reusablePrefetchId = requestedPrefetchId
+      || (questionPrefetch?.question.trim() === cleaned ? questionPrefetch.id : undefined);
     if (!usingTauri()) {
       runDemoAnswer(cleaned);
+      setQuestionPrefetch(null);
       return;
     }
     try {
-      await generateAnswer(activeWorkspace.id, activeProfile.id, cleaned, activeMeetingId || undefined);
+      await generateAnswer(activeWorkspace.id, activeProfile.id, cleaned, activeMeetingId || undefined, reusablePrefetchId || undefined);
+      setQuestionPrefetch(null);
     } catch (error) {
       setIsGenerating(false);
       setAnswer((current) => ({ ...current, status: "failed", error: String(error) }));
@@ -375,9 +459,15 @@ export default function App() {
 
   async function toggleCapture() {
     if (isCapturing) {
-      await stopCapture();
-      setIsCapturing(false);
-      setNotice("已停止采集；本次不会保留原始音频。");
+      try {
+        const result = await stopCapture();
+        setIsCapturing(false);
+        setNotice(result.outcome === "forced"
+          ? "未收到桥接释放确认，已执行强制结束兜底；请在“可观测性”查看详情，并确认 macOS 共享状态已关闭。"
+          : "桥接已释放，已停止采集；本次不会保留原始音频。");
+      } catch (error) {
+        setNotice("无法确认音频桥接已停止，采集状态保持不变：" + readableError(error));
+      }
       return;
     }
     if (!consentAccepted) {
@@ -391,6 +481,10 @@ export default function App() {
         return;
       }
       setTranscripts([]);
+      setAudioHealth({
+        microphone: { frames: 0, seconds: 0, state: "starting" },
+        system: { frames: 0, seconds: 0, state: "starting" },
+      });
       await startCapture();
       setIsCapturing(true);
       setNotice("正在连接腾讯云实时 ASR 并采集系统音频与麦克风；默认不保存原始音频。");
@@ -489,7 +583,77 @@ export default function App() {
       };
     });
     setActiveMeetingId(saved.id);
-    setNotice("会议/面试信息已保存，后续回答会引用该记录。");
+    setNotice("会议配置已保存；后续回答只会使用该会议勾选的资料范围。");
+  }
+
+  async function onDeleteMeetingRecord(record: MeetingRecord) {
+    if (!window.confirm(`确认删除会议“${record.title}”及其配置快照吗？知识库原文件不会被删除。`)) return;
+    try {
+      await deleteMeetingRecord(record.id);
+      setSnapshot((current) => ({ ...current, meetingRecords: current.meetingRecords.filter((item) => item.id !== record.id) }));
+      if (activeMeetingId === record.id) setActiveMeetingId("");
+      setNotice("会议配置已删除；知识库资料未受影响。");
+    } catch (error) {
+      setNotice("会议删除失败：" + readableError(error));
+    }
+  }
+
+  async function onExportReview(record: MeetingRecord) {
+    const selectedDocuments = snapshot.documents.filter((document) => record.knowledgeScope.includes(document.id));
+    const meetingTranscripts = transcripts.filter((segment) => segment.sessionId !== "demo");
+    const markdown = [
+      `# ${record.title}`,
+      "",
+      "- 会议类型：售前商务会议",
+      `- 公司：${record.companyName || "未填写"}`,
+      `- 计划时间：${record.scheduledAt || "未安排"}`,
+      `- 状态：${record.status}`,
+      "",
+      "## 场景与背景",
+      "",
+      record.scenarioContext || "未填写",
+      "",
+      "## 备注",
+      "",
+      record.notes || "未填写",
+      "",
+      "## 输出要求",
+      "",
+      record.outputRequirements || "使用回答风格默认要求",
+      "",
+      "## 本次知识范围",
+      "",
+      ...(selectedDocuments.length ? selectedDocuments.map((document) => `- ${document.name}（${document.status === "ready" ? "可检索" : formatStatus(document.status)}）`) : ["- 未选择资料"]),
+      "",
+      "## 会议转写",
+      "",
+      ...(meetingTranscripts.length ? meetingTranscripts.map((segment) => `- **${segment.speakerLabel} ${segment.startedAt}**：${segment.text}`) : ["当前没有可导出的实时转写。"]),
+      "",
+      "## 深度复盘",
+      "",
+      "> 云端复盘能力尚未接入。本文件仅导出当前客户端中真实存在的会议配置与转写，不包含 AI 生成的复盘结论。",
+      "",
+    ].join("\n");
+    try {
+      const safeName = record.title.replace(/[\\/:*?\"<>|]/g, "-").slice(0, 60) || "会议复盘";
+      const path = await exportMarkdown(markdown, `${safeName}-复盘.md`);
+      if (path) setNotice("Markdown 已导出：" + path);
+    } catch (error) {
+      setNotice("Markdown 导出失败：" + readableError(error));
+    }
+  }
+
+  async function copyAnswer() {
+    if (!answer.content.trim()) {
+      setNotice("当前没有可复制的回答。");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(answer.content);
+      setNotice("回答已复制到剪贴板；应用不会自动发送或发言。");
+    } catch (error) {
+      setNotice("复制失败：" + readableError(error));
+    }
   }
 
   async function onSaveProviders() {
@@ -570,9 +734,9 @@ export default function App() {
           </div>
         </div>
 
-        <div className="workspace-list" aria-label="工作区">
-          <p className="eyebrow">工作区</p>
-          {snapshot.workspaces.map((workspace) => (
+        <div className="workspace-list" aria-label="会议类型">
+          <p className="eyebrow">会议类型</p>
+          {workspaces.map((workspace) => (
             <button
               className={"workspace-button " + (activeWorkspaceId === workspace.id ? "selected" : "")}
               key={workspace.id}
@@ -582,10 +746,14 @@ export default function App() {
                 setActiveView("live");
               }}
             >
-              <span className="workspace-dot">{workspace.kind === "interview" ? "面" : "商"}</span>
+              <span className="workspace-dot">商</span>
               <span><b>{workspace.name}</b><small>{workspace.indexedCount}/{workspace.documentCount} 已索引</small></span>
             </button>
           ))}
+          <button className="sidebar-primary" onClick={() => setActiveView("history")}>
+            <Plus size={16} weight="bold" aria-hidden="true" />
+            配置新会议
+          </button>
         </div>
 
         <nav className="navigation" aria-label="主导航">
@@ -610,7 +778,7 @@ export default function App() {
       <section className="main-panel">
         <header className="topbar">
           <div>
-            <p className="eyebrow">{activeWorkspace?.kind === "business" ? "商务会议工作区" : "面试准备工作区"}</p>
+            <p className="eyebrow">售前商务会议</p>
             <h1>{activeView === "live" ? "实时回答助手" : viewItems.find((item) => item.id === activeView)?.label}</h1>
           </div>
           <div className="topbar-session" role="status" aria-live="polite">
@@ -657,6 +825,16 @@ export default function App() {
             setActiveMeetingId={setActiveMeetingId}
             isCapturing={isCapturing}
             transcripts={transcripts}
+            audioHealth={audioHealth}
+            questionPrefetch={questionPrefetch}
+            onConfirmCandidate={() => questionPrefetch && submitQuestion(questionPrefetch.question, questionPrefetch.id)}
+            onDismissCandidate={() => {
+              setQuestionPrefetch(null);
+              setNotice("已忽略疑似问题；实时转写会继续运行。");
+            }}
+            onCopyAnswer={copyAnswer}
+            onRetryAnswer={() => submitQuestion(answer.question || question)}
+            onUseTranscriptQuestion={beginCandidatePrefetch}
           />
         )}
         {activeView === "knowledge" && (
@@ -675,12 +853,24 @@ export default function App() {
           <HistoryView
             workspace={activeWorkspace}
             records={meetings}
+            documents={documents}
             activeRecordId={activeMeetingId}
             onActivate={(record) => {
               setActiveMeetingId(record.id);
               setActiveView("live");
             }}
             onSave={onSaveMeetingRecord}
+            onDelete={onDeleteMeetingRecord}
+          />
+        )}
+        {activeView === "review" && (
+          <ReviewView
+            records={meetings}
+            activeRecordId={activeMeetingId}
+            setActiveRecordId={setActiveMeetingId}
+            transcripts={transcripts}
+            documents={documents}
+            onExport={onExportReview}
           />
         )}
         {activeView === "observability" && (
@@ -747,9 +937,37 @@ function LiveView(props: {
   setActiveMeetingId: (id: string) => void;
   isCapturing: boolean;
   transcripts: TranscriptSegment[];
+  audioHealth: Record<"microphone" | "system", AudioHealth>;
+  questionPrefetch: QuestionPrefetch | null;
+  onConfirmCandidate: () => void;
+  onDismissCandidate: () => void;
+  onCopyAnswer: () => void;
+  onRetryAnswer: () => void;
+  onUseTranscriptQuestion: (text: string) => void;
 }) {
+  const [focusMode, setFocusMode] = useState(false);
+  const activeMeeting = props.meetings.find((record) => record.id === props.activeMeetingId);
+  const audioReady = props.audioHealth.microphone.state === "healthy" || props.audioHealth.system.state === "healthy";
+
   return (
-    <div className="live-layout command-layout">
+    <div className={focusMode ? "live-experience focus-mode" : "live-experience"}>
+      <section className="meeting-preflight" aria-label="会议准备状态">
+        <div className="preflight-title">
+          <span className="status-dot online" />
+          <div><b>{activeMeeting?.title || "尚未关联会议"}</b><small>回答前快速确认上下文、授权与音频状态</small></div>
+        </div>
+        <div className={activeMeeting ? "preflight-item ready" : "preflight-item"}>
+          <span>01</span><div><b>会议上下文</b><small>{activeMeeting ? "已关联会议配置" : "可在会议模块补充"}</small></div>
+        </div>
+        <div className={props.consentAccepted ? "preflight-item ready" : "preflight-item"}>
+          <span>02</span><div><b>采集授权</b><small>{props.consentAccepted ? "已确认授权" : "开始前需要确认"}</small></div>
+        </div>
+        <div className={audioReady ? "preflight-item ready" : "preflight-item"}>
+          <span>03</span><div><b>双音源</b><small>{audioReady ? "已接收音频帧" : props.isCapturing ? "正在等待音频" : "采集后自动检测"}</small></div>
+        </div>
+      </section>
+
+      <div className="live-layout command-layout">
       <section className="transcript-panel transcript-rail">
         <div className="panel-heading">
           <div><p className="eyebrow">实时转写</p><h2>会议语境</h2></div>
@@ -759,12 +977,23 @@ function LiveView(props: {
           <input type="checkbox" checked={props.consentAccepted} onChange={(event) => props.setConsentAccepted(event.target.checked)} />
           <span>我已取得会议转写及必要云端处理的授权。</span>
         </label>
+        <div className="audio-health-grid" aria-label="双音源采集健康">
+          {(["microphone", "system"] as const).map((source) => {
+            const health = props.audioHealth[source];
+            return (
+              <div className={"audio-health-item " + health.state} key={source}>
+                <span className={health.state === "healthy" ? "status-dot online" : "status-dot"} />
+                <div><b>{source === "microphone" ? "本机麦克风" : "系统音频"}</b><small>{health.state === "healthy" ? `${health.frames} 帧 · ${health.seconds.toFixed(1)} 秒` : health.state === "changed" ? "设备已变化" : props.isCapturing ? "等待音频帧" : "尚未采集"}</small></div>
+              </div>
+            );
+          })}
+        </div>
         <div className="transcript-list">
           {props.transcripts.map((segment) => (
             <article className={"transcript-item " + (segment.speaker === "self" ? "self" : "")} key={segment.id}>
               <div><span className="speaker-label">{segment.speakerLabel}</span><time>{segment.startedAt}</time></div>
               <p>{segment.text}</p>
-              {segment.isQuestionCandidate && <span className="question-tag"><Sparkle size={11} weight="fill" aria-hidden="true" /> 疑似问题</span>}
+              {segment.isQuestionCandidate && <button className="question-tag" onClick={() => props.onUseTranscriptQuestion(segment.text)}><Sparkle size={11} weight="fill" aria-hidden="true" /> 作为候选问题</button>}
             </article>
           ))}
           {!props.transcripts.length && <div className="transcript-empty">{props.isCapturing ? "正在等待第一段语音…" : "开始采集后，实时转写将显示在这里。"}</div>}
@@ -775,19 +1004,29 @@ function LiveView(props: {
       <section className="answer-panel answer-stage">
         <div className="answer-stage-header">
           <div><p className="eyebrow"><Sparkle size={13} weight="fill" aria-hidden="true" /> AI 回答</p><h2>{outputTitle(props.activeProfile)}</h2></div>
-          <div className="answer-status">
-            <span className={props.answer.status === "streaming" ? "status-dot online breathing" : "status-dot online"} />
-            <span>{props.answer.status === "streaming" ? "流式生成中" : "准备就绪"}</span>
+          <div className="answer-header-actions">
+            <button className="focus-toggle" onClick={() => setFocusMode((current) => !current)} title={focusMode ? "退出专注模式" : "进入专注模式"}>
+              {focusMode ? <CornersIn size={15} weight="bold" aria-hidden="true" /> : <CornersOut size={15} weight="bold" aria-hidden="true" />}
+              {focusMode ? "退出专注" : "专注阅读"}
+            </button>
+            <div className="answer-status">
+              <span className={props.answer.status === "streaming" ? "status-dot online breathing" : "status-dot online"} />
+              <span>{props.answer.status === "streaming" ? "流式生成中" : "准备就绪"}</span>
+            </div>
           </div>
         </div>
 
         <article className={"answer-card " + props.answer.status}>
           <div className="answer-meta">
-            <span><ShieldCheck size={13} weight="fill" aria-hidden="true" /> {props.answer.status === "streaming" ? "流式输出中" : props.answer.status === "failed" ? "生成失败" : "已基于资料整理"}</span>
+            <span><ShieldCheck size={13} weight="fill" aria-hidden="true" /> {props.answer.status === "idle" ? "等待确认问题" : props.answer.status === "streaming" ? "流式输出中" : props.answer.status === "failed" ? "生成失败" : "已基于资料整理"}</span>
             {props.answer.firstTokenMs && <span>首字 {props.answer.firstTokenMs} ms</span>}
             {props.answer.retrievalMs && <span>检索 {props.answer.retrievalMs} ms</span>}
           </div>
-          {props.answer.error ? <p className="error-text">{props.answer.error}</p> : <p className="answer-content">{props.answer.content || "正在根据资料检索并生成…"}</p>}
+          {props.answer.error ? <p className="error-text">{props.answer.error}</p> : <p className="answer-content">{props.answer.content || (props.answer.status === "idle" ? "确认疑似问题或手动输入问题后，回答将在这里流式输出。" : "正在根据资料检索并生成…")}</p>}
+          <div className="answer-actions">
+            <button disabled={!props.answer.content || props.answer.status === "streaming"} onClick={props.onCopyAnswer}>复制回答</button>
+            <button disabled={props.isGenerating || !props.answer.question} onClick={props.onRetryAnswer}>重新生成</button>
+          </div>
           <button className="sources-toggle" onClick={() => props.setExpandedSources(!props.expandedSources)}>
             {props.expandedSources ? "收起资料依据" : "展开资料依据"} · {props.answer.citations.length} 条
           </button>
@@ -813,13 +1052,34 @@ function LiveView(props: {
           </select>
         </section>
         <section className="control-group meeting-control">
-          <div className="control-heading"><span>当前会议记录</span><Clock size={16} weight="duotone" aria-hidden="true" /></div>
-          <select value={props.activeMeetingId} onChange={(event) => props.setActiveMeetingId(event.target.value)} aria-label="选择会议或面试记录">
+          <div className="control-heading"><span>当前会议</span><Clock size={16} weight="duotone" aria-hidden="true" /></div>
+          <select value={props.activeMeetingId} onChange={(event) => props.setActiveMeetingId(event.target.value)} aria-label="选择会议记录">
             <option value="">不关联登记记录</option>
             {props.meetings.map((record) => <option key={record.id} value={record.id}>{record.title}</option>)}
           </select>
-          <p>岗位 JD、备注及会议背景会以受控上下文参与回答。</p>
+          <p>会议背景、客户信息、备注和本次资料范围会以受控上下文参与回答。</p>
         </section>
+        {props.questionPrefetch && (
+          <section className={"candidate-card " + props.questionPrefetch.status}>
+            <div className="candidate-heading">
+              <span>疑似问题 · 等待确认</span>
+              {props.questionPrefetch.status === "prefetching" && <CircleNotch className="spin" size={15} weight="bold" aria-hidden="true" />}
+              {props.questionPrefetch.status === "ready" && <CheckCircle size={15} weight="fill" aria-hidden="true" />}
+              {(props.questionPrefetch.status === "failed" || props.questionPrefetch.status === "insufficient") && <WarningCircle size={15} weight="fill" aria-hidden="true" />}
+            </div>
+            <p>{props.questionPrefetch.question}</p>
+            <small>
+              {props.questionPrefetch.status === "prefetching" && "正在向量化、召回并重排…"}
+              {props.questionPrefetch.status === "ready" && `已找到 ${props.questionPrefetch.evidenceCount} 条依据 · ${props.questionPrefetch.retrievalMs} ms`}
+              {props.questionPrefetch.status === "insufficient" && "本次资料范围暂无足够依据"}
+              {props.questionPrefetch.status === "failed" && (props.questionPrefetch.error || "预检索失败，可在问题框手动重试")}
+            </small>
+            <div className="candidate-actions">
+              <button className="candidate-dismiss" onClick={props.onDismissCandidate}>忽略</button>
+              <button disabled={props.questionPrefetch.status === "prefetching" || props.questionPrefetch.status === "failed" || props.isGenerating} onClick={props.onConfirmCandidate}>确认并生成</button>
+            </div>
+          </section>
+        )}
         <section className="question-box">
           <div className="control-heading"><label htmlFor="question">当前问题</label><Microphone size={16} weight="duotone" aria-hidden="true" /></div>
           <textarea
@@ -843,6 +1103,7 @@ function LiveView(props: {
           </div>
         </section>
       </aside>
+      </div>
     </div>
   );
 }
@@ -889,8 +1150,8 @@ function ProfileView(props: { profile: AnswerProfile; onSave: (profile: AnswerPr
       <div className="form-grid">
         <label>配置名称<input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
         <label>输出语言<select value={draft.language} onChange={(event) => setDraft({ ...draft, language: event.target.value as AnswerProfile["language"] })}><option value="zh">中文</option><option value="en">English</option><option value="bilingual">中英双语</option></select></label>
-        <label>回答时长<select value={draft.duration} onChange={(event) => setDraft({ ...draft, duration: event.target.value as AnswerProfile["duration"] })}><option value="30s">30 秒</option><option value="60s">60 秒</option><option value="90s">90 秒</option></select></label>
-        <label>组织方式<select value={draft.style} onChange={(event) => setDraft({ ...draft, style: event.target.value as AnswerProfile["style"] })}><option value="star">STAR 面试结构</option><option value="business">商务结论与待确认项</option><option value="concise">简洁直答</option></select></label>
+        <label>回答时长<select value={draft.duration} onChange={(event) => setDraft({ ...draft, duration: event.target.value as AnswerProfile["duration"] })}><option value="15s">15 秒</option><option value="30s">30 秒</option><option value="60s">60 秒</option><option value="90s">90 秒</option></select></label>
+        <label>组织方式<select value={draft.style} onChange={(event) => setDraft({ ...draft, style: event.target.value as AnswerProfile["style"] })}><option value="business">商务结论与待确认项</option><option value="concise">简洁直答</option></select></label>
         <label className="wide">补充要求<textarea value={draft.additionalInstructions} onChange={(event) => setDraft({ ...draft, additionalInstructions: event.target.value })} /></label>
       </div>
       <button className="primary-button" onClick={() => props.onSave(draft)}>保存回答风格</button>
@@ -899,16 +1160,20 @@ function ProfileView(props: { profile: AnswerProfile; onSave: (profile: AnswerPr
 }
 
 function createRecord(workspace?: Workspace): MeetingRecord {
-  const isInterview = workspace?.kind !== "business";
   const timestamp = new Date().toISOString();
   return {
     id: "record-" + Date.now(),
-    workspaceId: workspace?.id || "interview",
-    kind: isInterview ? "interview" : "business",
-    title: isInterview ? "新建面试记录" : "新建商务会议",
-    jobTitle: "",
-    jobDescription: "",
+    workspaceId: workspace?.id || "business",
+    kind: "business",
+    title: "新建售前商务会议",
+    scenarioContext: "",
+    companyName: "",
     notes: "",
+    outputRequirements: "按结论、客户价值、建议方案、待确认项和下一步问题组织，不作未经确认的承诺。",
+    knowledgeScope: [],
+    resumeDocumentId: undefined,
+    resumeConfirmedAt: undefined,
+    packetVersion: 1,
     status: "draft",
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -918,74 +1183,265 @@ function createRecord(workspace?: Workspace): MeetingRecord {
 function HistoryView(props: {
   workspace?: Workspace;
   records: MeetingRecord[];
+  documents: KnowledgeDocument[];
   activeRecordId: string;
   onActivate: (record: MeetingRecord) => void;
-  onSave: (record: MeetingRecord) => void;
+  onSave: (record: MeetingRecord) => Promise<void>;
+  onDelete: (record: MeetingRecord) => Promise<void>;
 }) {
   const [draft, setDraft] = useState<MeetingRecord>(() => createRecord(props.workspace));
   const [validationError, setValidationError] = useState("");
+  const [step, setStep] = useState<1 | 2 | 3>(1);
+  const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     setDraft(createRecord(props.workspace));
     setValidationError("");
+    setStep(1);
   }, [props.workspace?.id]);
 
-  const isInterview = draft.kind === "interview";
-
-  function save() {
-    if (!draft.title.trim() || !draft.notes.trim()) {
-      setValidationError("请填写会议/面试主题和备注信息。");
-      return;
+  function validateStep(target: 1 | 2 | 3): boolean {
+    if (target === 1 && (!draft.title.trim() || !draft.scenarioContext.trim())) {
+      setValidationError("请先填写会议主题和场景背景。");
+      return false;
     }
-    if (isInterview && (!draft.jobTitle?.trim() || !draft.jobDescription?.trim())) {
-      setValidationError("面试登记必须填写岗位名称和岗位 JD。");
+    if (target === 3 && !draft.notes.trim()) {
+      setValidationError("请填写备注信息，明确本次会议的重点和边界。");
+      return false;
+    }
+    setValidationError("");
+    return true;
+  }
+
+  function nextStep() {
+    if (!validateStep(step)) return;
+    setStep((current) => Math.min(3, current + 1) as 1 | 2 | 3);
+  }
+
+  function startNew() {
+    setDraft(createRecord(props.workspace));
+    setValidationError("");
+    setStep(1);
+  }
+
+  function editRecord(record: MeetingRecord) {
+    setDraft(record);
+    setValidationError("");
+    setStep(1);
+  }
+
+  async function save() {
+    if (!draft.title.trim() || !draft.scenarioContext.trim() || !draft.notes.trim()) {
+      setValidationError("请填写会议主题、场景背景和备注信息。");
       return;
     }
     setValidationError("");
-    props.onSave({ ...draft, updatedAt: new Date().toISOString() });
+    setIsSaving(true);
+    try {
+      await props.onSave({ ...draft, updatedAt: new Date().toISOString() });
+    } catch (error) {
+      setValidationError(readableError(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  function toggleKnowledge(documentId: string) {
+    const selected = draft.knowledgeScope.includes(documentId);
+    const knowledgeScope = selected
+      ? draft.knowledgeScope.filter((id) => id !== documentId)
+      : [...draft.knowledgeScope, documentId];
+    setDraft({
+      ...draft,
+      knowledgeScope,
+    });
   }
 
   return (
     <section className="content-view records-view">
       <div className="section-intro">
-        <div><p className="eyebrow">会议与面试档案</p><h2>登记、查看与复用上下文</h2><p>将岗位 JD、会议主题和备注与资料库绑定；实时回答仅使用当前工作区和已选择记录。</p></div>
-        <button className="secondary-button" onClick={() => setDraft(createRecord(props.workspace))}>新建记录</button>
+        <div><p className="eyebrow">会议准备中心</p><h2>用三步准备一场高质量会议</h2><p>从会议背景、资料范围到回答要求逐步确认。保存后，实时助手会把这些信息作为受控上下文。</p></div>
+        <button className="primary-button" onClick={startNew}><Plus size={15} weight="bold" aria-hidden="true" />新建会议</button>
       </div>
-      <div className="records-layout">
-        <section className="record-form">
-          <div className="form-title"><h3>{draft.id.startsWith("record-") ? "登记新记录" : "编辑记录"}</h3><span>{isInterview ? "面试" : "商务会议"}</span></div>
-          <div className="form-grid">
-            <label>记录类型<select value={draft.kind} onChange={(event) => setDraft({ ...draft, kind: event.target.value as MeetingRecord["kind"] })}><option value="interview">面试</option><option value="business">商务会议</option></select></label>
-            <label>状态<select value={draft.status} onChange={(event) => setDraft({ ...draft, status: event.target.value as MeetingRecord["status"] })}><option value="draft">草稿</option><option value="scheduled">已安排</option><option value="in_progress">进行中</option><option value="completed">已完成</option></select></label>
-            <label className="wide">会议/面试主题<input value={draft.title} placeholder={isInterview ? "例如：AI 解决方案架构师 · 一面" : "例如：客户 AI 方案交流"} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label>
-            {isInterview && <label>岗位名称<input value={draft.jobTitle || ""} placeholder="例如：AI 解决方案架构师" onChange={(event) => setDraft({ ...draft, jobTitle: event.target.value })} /></label>}
-            <label>计划时间<input value={draft.scheduledAt || ""} placeholder="2026-08-04 14:30" onChange={(event) => setDraft({ ...draft, scheduledAt: event.target.value })} /></label>
-            {isInterview && <label className="wide">岗位 JD<textarea value={draft.jobDescription || ""} placeholder="填写职位职责、任职要求、技术/业务重点。会作为回答的场景约束，不会替代知识库事实。" onChange={(event) => setDraft({ ...draft, jobDescription: event.target.value })} /></label>}
-            <label className="wide">备注信息<textarea value={draft.notes} placeholder={isInterview ? "例如：重点准备项目经验、技术问题和业务成果。" : "例如：客户背景、待确认问题、沟通目标。"} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
-          </div>
-          {validationError && <p className="error-text">{validationError}</p>}
-          <button className="primary-button" onClick={save}>保存并关联当前工作区</button>
-        </section>
-
-        <section className="record-list">
-          <div className="list-heading"><h3>已登记记录</h3><span>{props.records.length} 条</span></div>
+      <div className="meeting-studio">
+        <aside className="meeting-library">
+          <div className="list-heading"><div><p className="eyebrow">会议列表</p><h3>已创建会议</h3></div><span>{props.records.length} 条</span></div>
           {props.records.map((record) => (
             <article className={"record-item " + (props.activeRecordId === record.id ? "selected" : "")} key={record.id}>
-              <div className="record-item-top"><span className="status-badge ready">{record.kind === "interview" ? "面试" : "会议"}</span><small>{record.scheduledAt || "未安排时间"}</small></div>
+              <div className="record-item-top"><span className="status-badge ready">售前商务会议</span><small>{record.scheduledAt || "未安排时间"}</small></div>
               <h4>{record.title}</h4>
-              {record.jobTitle && <p>岗位：{record.jobTitle}</p>}
+              {record.companyName && <p>公司：{record.companyName}</p>}
               <p>{record.notes}</p>
-              <div><button onClick={() => setDraft(record)}>编辑</button><button className="text-action" onClick={() => props.onActivate(record)}>用于实时回答</button></div>
+              <p className="record-scope">配置 v{record.packetVersion} · 本次资料：{record.knowledgeScope.length} 项</p>
+              <div>
+                <button onClick={() => editRecord(record)}>编辑</button>
+                <button onClick={() => { setDraft({ ...record, id: "record-" + Date.now(), title: record.title + " 副本", status: "draft", resumeConfirmedAt: undefined, packetVersion: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }); setStep(1); }}>复制</button>
+                <button className="text-action" onClick={() => props.onActivate(record)}>进入实时助手</button>
+                <button className="danger-action" onClick={() => props.onDelete(record)}>删除</button>
+              </div>
             </article>
           ))}
-          {!props.records.length && <div className="empty-state">当前工作区还没有登记记录。</div>}
+          {!props.records.length && <div className="empty-state">当前还没有创建售前商务会议。</div>}
+        </aside>
+
+        <section className="meeting-editor">
+          <div className="form-title"><div><p className="eyebrow">会前配置</p><h3>{draft.title || "未命名会议"}</h3></div><span>售前商务会议</span></div>
+          <div className="preparation-stepper" aria-label="会议配置步骤">
+            {[
+              { id: 1 as const, title: "背景与目标", hint: "场景、客户、目标" },
+              { id: 2 as const, title: "资料范围", hint: "限定 RAG 范围" },
+              { id: 3 as const, title: "表达与确认", hint: "风格、备注、保存" },
+            ].map((item) => (
+              <button className={step === item.id ? "active" : step > item.id ? "complete" : ""} key={item.id} onClick={() => setStep(item.id)} aria-current={step === item.id ? "step" : undefined}>
+                <span>{step > item.id ? "✓" : `0${item.id}`}</span><div><b>{item.title}</b><small>{item.hint}</small></div>
+              </button>
+            ))}
+          </div>
+
+          <div className="meeting-step-panel" key={step}>
+            {step === 1 && (
+              <>
+                <div className="step-copy"><span>STEP 01</span><h4>告诉助手这是一场什么会议</h4><p>先补充最影响回答判断的信息，后续仍可随时返回修改。</p></div>
+                <div className="form-grid guided-grid">
+                  <label className="wide">会议主题<input value={draft.title} placeholder="例如：券商 ToC 智能客服方案交流" onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label>
+                  <label className="wide">会议场景、主题与背景<textarea value={draft.scenarioContext} placeholder="说明客户角色、业务现状、交流目标、关注问题和期望结果。" onChange={(event) => setDraft({ ...draft, scenarioContext: event.target.value })} /></label>
+                  <label>公司名称<input value={draft.companyName || ""} placeholder="例如：国投证券" onChange={(event) => setDraft({ ...draft, companyName: event.target.value })} /></label>
+                  <label>会议类型<input value="售前商务会议" readOnly /></label>
+                </div>
+              </>
+            )}
+
+            {step === 2 && (
+              <>
+                <div className="step-copy"><span>STEP 02</span><h4>限定本次可使用的资料</h4><p>只勾选真正适用于当前客户和议题的材料，避免跨客户、跨项目误用信息。</p></div>
+                <div className="meeting-materials guided-materials">
+                  <div className="material-heading"><div><h4>本次知识范围</h4><p>只有勾选且完成索引的资料会参与本次 RAG 检索。</p></div><span>{draft.knowledgeScope.length} 项</span></div>
+                  <div className="scope-list">
+                    {props.documents.map((document) => (
+                      <label className={document.status === "ready" ? "scope-item" : "scope-item disabled"} key={document.id}>
+                        <input type="checkbox" disabled={document.status !== "ready"} checked={draft.knowledgeScope.includes(document.id)} onChange={() => toggleKnowledge(document.id)} />
+                        <span><b>{document.name}</b><small>{document.extension} · {formatStatus(document.status)}</small></span>
+                      </label>
+                    ))}
+                    {!props.documents.length && <div className="empty-state compact">请先在知识库导入资料，再配置本次检索范围。</div>}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {step === 3 && (
+              <>
+                <div className="step-copy"><span>STEP 03</span><h4>定义怎样回答，以及哪些信息不能越界</h4><p>把表达偏好和会议边界写清楚，助手会优先生成可直接参考的口语化答案。</p></div>
+                <div className="form-grid guided-grid">
+                  <label className="wide">备注信息<textarea value={draft.notes} placeholder="补充客户事实、待确认问题、会议目标和不能直接承诺的边界。" onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label>
+                  <label className="wide">其他会议要求（输出风格与格式）<textarea value={draft.outputRequirements} placeholder="例如：中文口语化；先给结论；分点回答；控制在 60 秒；未知信息标记待确认。" onChange={(event) => setDraft({ ...draft, outputRequirements: event.target.value })} /></label>
+                  <label>计划时间<input value={draft.scheduledAt || ""} placeholder="2026-08-08 14:30" onChange={(event) => setDraft({ ...draft, scheduledAt: event.target.value })} /></label>
+                  <label>状态<select value={draft.status} onChange={(event) => setDraft({ ...draft, status: event.target.value as MeetingRecord["status"] })}><option value="draft">草稿</option><option value="scheduled">已安排</option><option value="in_progress">进行中</option><option value="completed">已完成</option></select></label>
+                </div>
+                <div className="meeting-summary">
+                  <div><span>当前会议</span><b>{draft.title || "待填写"}</b><small>{draft.companyName || "未填写公司"}</small></div>
+                  <div><span>本次资料</span><b>{draft.knowledgeScope.length} 项</b><small>仅使用已勾选且完成索引的资料</small></div>
+                  <div><span>可信边界</span><b>受控上下文</b><small>未知信息标记为待确认</small></div>
+                </div>
+              </>
+            )}
+          </div>
+
+          {validationError && <p className="error-text meeting-validation" role="alert">{validationError}</p>}
+          <div className="meeting-step-actions">
+            <button className="secondary-button" disabled={step === 1} onClick={() => setStep((current) => Math.max(1, current - 1) as 1 | 2 | 3)}><ArrowLeft size={14} weight="bold" aria-hidden="true" />上一步</button>
+            {step < 3 ? <button className="primary-button" onClick={nextStep}>下一步<ArrowRight size={14} weight="bold" aria-hidden="true" /></button> : <button className="primary-button" disabled={isSaving} onClick={save}>{isSaving ? "正在保存…" : "保存并完成配置"}</button>}
+          </div>
         </section>
       </div>
       <div className="metric-grid">
-        <article><span>问题结束至首字</span><b>1.64 s</b><small>目标 P95 ≤ 3.00 s</small></article>
-        <article><span>本次检索</span><b>218 ms</b><small>FTS、向量召回与重排</small></article>
+        <article><span>资料范围</span><b>强隔离</b><small>未勾选资料不会进入本次检索</small></article>
+        <article><span>配置快照</span><b>自动版本化</b><small>每次保存都会生成新版本</small></article>
         <article><span>转写记录</span><b>本机保存</b><small>原始音频未保留</small></article>
       </div>
+    </section>
+  );
+}
+
+function ReviewView(props: {
+  records: MeetingRecord[];
+  activeRecordId: string;
+  setActiveRecordId: (id: string) => void;
+  transcripts: TranscriptSegment[];
+  documents: KnowledgeDocument[];
+  onExport: (record: MeetingRecord) => Promise<void>;
+}) {
+  const [tab, setTab] = useState<"summary" | "ledger" | "evidence" | "concerns" | "actions">("summary");
+  const active = props.records.find((record) => record.id === props.activeRecordId) || props.records[0];
+  const scopedDocuments = active ? props.documents.filter((document) => active.knowledgeScope.includes(document.id)) : [];
+  const realTranscripts = props.transcripts.filter((segment) => segment.sessionId !== "demo");
+  const tabs = [
+    { id: "summary" as const, label: "会议概览" },
+    { id: "ledger" as const, label: "问题账本" },
+    { id: "evidence" as const, label: "回答与证据" },
+    { id: "concerns" as const, label: "关注点" },
+    { id: "actions" as const, label: "行动项" },
+  ];
+
+  return (
+    <section className="content-view review-view">
+      <div className="section-intro review-intro">
+        <div><p className="eyebrow">云端会议复盘</p><h2>深度会议复盘</h2><p>当前版本先提供完整前端结构与本地 Markdown 导出；云端分析尚未接入，因此不会展示虚构评分或结论。</p></div>
+        <button className="primary-button" disabled={!active} onClick={() => active && props.onExport(active)}><DownloadSimple size={16} weight="bold" aria-hidden="true" /> 导出本地记录 Markdown</button>
+      </div>
+
+      <div className="review-status"><CircleNotch size={16} weight="bold" aria-hidden="true" /><div><b>云端复盘待接入</b><span>前端界面已就绪；后续版本将基于用户主动提交的转写和会议配置生成分析。</span></div></div>
+
+      <div className="review-toolbar">
+        <label>选择会议
+          <select value={active?.id || ""} onChange={(event) => props.setActiveRecordId(event.target.value)}>
+            {!props.records.length && <option value="">暂无会议</option>}
+            {props.records.map((record) => <option key={record.id} value={record.id}>{record.title}</option>)}
+          </select>
+        </label>
+        <div className="review-tabs" role="tablist">
+          {tabs.map((item) => <button role="tab" aria-selected={tab === item.id} className={tab === item.id ? "active" : ""} key={item.id} onClick={() => setTab(item.id)}>{item.label}</button>)}
+        </div>
+      </div>
+
+      {!active ? <div className="empty-state">请先在“会议”模块创建一场会议，再进入复盘。</div> : (
+        <div className="review-layout">
+          <aside className="review-context-card">
+            <p className="eyebrow">输入完整度</p>
+            <h3>{active.title}</h3>
+            <ul>
+              <li className={active.scenarioContext ? "ready" : ""}><span />会议背景{active.scenarioContext ? "已填写" : "待补充"}</li>
+              <li className="ready"><span />会议类型售前商务会议</li>
+              <li className={scopedDocuments.length ? "ready" : ""}><span />资料范围{scopedDocuments.length} 项</li>
+              <li className={realTranscripts.length ? "ready" : ""}><span />会议转写{realTranscripts.length} 段</li>
+            </ul>
+          </aside>
+
+          <section className="review-result-card">
+            <div className="review-result-heading">
+              <div><p className="eyebrow">{tabs.find((item) => item.id === tab)?.label}</p><h3>{tab === "summary" ? "等待生成会议概览" : tab === "ledger" ? "等待整理会议问题账本" : tab === "evidence" ? "等待核对回答与资料证据" : tab === "concerns" ? "等待提炼关注点与待确认项" : "等待整理行动项与下一步"}</h3></div>
+              <span className="status-badge indexing">待接入</span>
+            </div>
+            <div className="review-placeholder">
+              <FileText size={31} weight="duotone" aria-hidden="true" />
+              <b>此区域不会显示演示性复盘结论</b>
+              <p>接入云端复盘后，只有在用户主动确认上传本次转写时才会开始分析；原始音频仍不上传、不保留。</p>
+            </div>
+          </section>
+
+          <aside className="review-data-card">
+            <p className="eyebrow">本次可用输入</p>
+            <dl>
+              <div><dt>公司</dt><dd>{active.companyName || "未填写"}</dd></div>
+              <div><dt>会议类型</dt><dd>售前商务会议</dd></div>
+              <div><dt>资料</dt><dd>{scopedDocuments.length} 项</dd></div>
+              <div><dt>转写</dt><dd>{realTranscripts.length} 段</dd></div>
+              <div><dt>导出</dt><dd>仅 Markdown</dd></div>
+            </dl>
+            <div className="privacy-note"><ShieldCheck size={15} weight="fill" aria-hidden="true" /><span>云端复盘未接入前，页面不会发送会议内容。</span></div>
+          </aside>
+        </div>
+      )}
     </section>
   );
 }

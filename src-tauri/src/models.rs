@@ -45,11 +45,26 @@ pub struct MeetingRecord {
     pub title: String,
     pub job_title: Option<String>,
     pub job_description: Option<String>,
+    #[serde(default)]
+    pub scenario_context: String,
+    pub company_name: Option<String>,
     pub notes: String,
+    #[serde(default)]
+    pub output_requirements: String,
+    #[serde(default)]
+    pub knowledge_scope: Vec<String>,
+    pub resume_document_id: Option<String>,
+    pub resume_confirmed_at: Option<String>,
+    #[serde(default = "default_packet_version")]
+    pub packet_version: i64,
     pub scheduled_at: Option<String>,
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+fn default_packet_version() -> i64 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,6 +131,17 @@ pub struct SourceCitation {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct QuestionPrefetch {
+    pub id: String,
+    pub question: String,
+    pub status: String,
+    pub evidence_count: usize,
+    pub retrieval_ms: u128,
+    pub citations: Vec<SourceCitation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AnswerStreamEvent {
     pub answer_id: String,
     pub kind: String,
@@ -141,6 +167,10 @@ pub struct TranscriptStreamEvent {
     pub is_question_candidate: bool,
     pub error: Option<String>,
     pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_frames: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

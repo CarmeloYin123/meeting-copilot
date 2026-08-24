@@ -3,10 +3,12 @@ import type {
   AnswerProfile,
   AnswerStreamEvent,
   AppSnapshot,
+  CaptureStopResult,
   KnowledgeDocument,
   MeetingRecord,
   ModelInvocation,
   ProviderStatus,
+  QuestionPrefetch,
   TranscriptStreamEvent,
   Workspace,
 } from "../types";
@@ -14,42 +16,30 @@ import type {
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 const demoWorkspaces: Workspace[] = [
-  { id: "interview", name: "面试准备", kind: "interview", documentCount: 4, indexedCount: 4 },
-  { id: "business", name: "商务会议", kind: "business", documentCount: 3, indexedCount: 3 },
+  { id: "business", name: "售前商务会议", kind: "business", documentCount: 2, indexedCount: 2 },
 ];
 
 const demoDocuments: KnowledgeDocument[] = [
-  { id: "cv", workspaceId: "interview", name: "候选人项目经历示例.pdf", extension: "PDF", status: "ready", segmentCount: 28, updatedAt: "今天 10:12" },
-  { id: "project", workspaceId: "interview", name: "企业 AI 方案案例示例.md", extension: "MD", status: "ready", segmentCount: 42, updatedAt: "昨天 21:40" },
   { id: "case", workspaceId: "business", name: "AI解决方案与案例.pptx", extension: "PPTX", status: "ready", segmentCount: 64, updatedAt: "今天 09:25" },
   { id: "proposal", workspaceId: "business", name: "客户需求与交流纪要.docx", extension: "DOCX", status: "ready", segmentCount: 31, updatedAt: "今天 09:18" },
 ];
 
 const demoProfiles: AnswerProfile[] = [
-  { id: "interview-default", workspaceId: "interview", name: "面试 · STAR 60 秒", language: "zh", duration: "60s", style: "star", additionalInstructions: "先给结论，再说明本人负责内容和可核验结果。" },
   { id: "business-default", workspaceId: "business", name: "商务 · 方案回答", language: "zh", duration: "60s", style: "business", additionalInstructions: "未在资料中确认的内容必须标为待确认。" },
 ];
 
 const demoMeetingRecords: MeetingRecord[] = [
   {
-    id: "interview-2026-08-04",
-    workspaceId: "interview",
-    kind: "interview",
-    title: "企业 AI 解决方案架构师 · 模拟面试",
-    jobTitle: "AI 解决方案架构师",
-    jobDescription: "负责企业客户 AI 解决方案设计、RAG/Agent 落地、售前交流与跨团队协同；要求有云服务、LLM 应用和客户项目经验。",
-    notes: "重点准备企业 AI 方案案例、RAG 质量控制和客户需求澄清。",
-    scheduledAt: "2026-08-04 14:30",
-    status: "scheduled",
-    createdAt: "2026-08-04 10:00",
-    updatedAt: "2026-08-04 10:00",
-  },
-  {
     id: "business-2026-08-05",
     workspaceId: "business",
     kind: "business",
     title: "客户 AI 知识助手交流",
+    scenarioContext: "与客户技术负责人交流券商 ToC 智能客服平台，目标是澄清业务范围、技术架构、部署与验收口径。",
+    companyName: "示例证券公司",
     notes: "待确认数据范围、系统接口、私有化部署和验收口径。",
+    outputRequirements: "按结论、客户价值、建议方案、待确认项和下一步问题组织，不作未经确认的承诺。",
+    knowledgeScope: ["case", "proposal"],
+    packetVersion: 1,
     scheduledAt: "2026-08-05 10:00",
     status: "draft",
     createdAt: "2026-08-04 09:30",
@@ -107,6 +97,12 @@ export async function saveMeetingRecord(record: MeetingRecord): Promise<MeetingR
   return { ...record, updatedAt: new Date().toLocaleString("zh-CN") };
 }
 
+export async function deleteMeetingRecord(meetingId: string): Promise<void> {
+  if (isTauri) {
+    await invoke("delete_meeting_record", { meetingId });
+  }
+}
+
 export async function importDocuments(workspaceId: string, paths: string[]): Promise<KnowledgeDocument[]> {
   if (!isTauri) {
     return paths.map((path, index) => ({
@@ -134,7 +130,7 @@ export async function rebuildDocument(documentId: string): Promise<KnowledgeDocu
   }
   return {
     id: documentId,
-    workspaceId: "interview",
+    workspaceId: "business",
     name: "正在重建索引",
     extension: "FILE",
     status: "indexing",
@@ -171,6 +167,26 @@ export async function getModelInvocations(): Promise<ModelInvocation[]> {
   return demoModelInvocations;
 }
 
+export async function exportMarkdown(content: string, suggestedName: string): Promise<string | null> {
+  if (!isTauri) {
+    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = suggestedName;
+    link.click();
+    URL.revokeObjectURL(url);
+    return suggestedName;
+  }
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const path = await save({
+    defaultPath: suggestedName,
+    filters: [{ name: "Markdown", extensions: ["md"] }],
+  });
+  if (!path) return null;
+  return invoke<string>("write_markdown_file", { path, content });
+}
+
 export async function requestCapturePermissions(): Promise<{ screen: boolean; microphone: boolean }> {
   if (isTauri) {
     return invoke("request_capture_permissions");
@@ -184,15 +200,37 @@ export async function startCapture(): Promise<void> {
   }
 }
 
-export async function stopCapture(): Promise<void> {
+export async function stopCapture(): Promise<CaptureStopResult> {
   if (isTauri) {
-    await invoke("stop_capture");
+    return invoke<CaptureStopResult>("stop_capture");
   }
+  return { outcome: "not-running", message: "浏览器演示模式不包含原生音频桥接。" };
 }
 
-export async function generateAnswer(workspaceId: string, profileId: string, question: string, meetingId?: string): Promise<void> {
+export async function prefetchQuestion(workspaceId: string, question: string, meetingId?: string): Promise<QuestionPrefetch> {
   if (isTauri) {
-    await invoke("generate_answer", { workspaceId, profileId, question, meetingId });
+    return invoke<QuestionPrefetch>("prefetch_question", { workspaceId, question, meetingId });
+  }
+  await new Promise((resolve) => window.setTimeout(resolve, 380));
+  return {
+    id: "demo-prefetch-" + Date.now(),
+    question,
+    status: "ready",
+    evidenceCount: 2,
+    retrievalMs: 218,
+    citations: demoDocuments.slice(0, 2).map((document, index) => ({
+      documentId: document.id,
+      documentName: document.name,
+      locator: index === 0 ? "项目案例 / 架构" : "会议资料 / 方案范围",
+      excerpt: "已在当前会议勾选的资料范围中找到相关证据。",
+      score: 0.9 - index * 0.08,
+    })),
+  };
+}
+
+export async function generateAnswer(workspaceId: string, profileId: string, question: string, meetingId?: string, prefetchId?: string): Promise<void> {
+  if (isTauri) {
+    await invoke("generate_answer", { workspaceId, profileId, question, meetingId, prefetchId });
   }
 }
 

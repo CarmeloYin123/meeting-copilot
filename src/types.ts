@@ -1,5 +1,5 @@
 export type WorkspaceKind = "interview" | "business";
-export type AppView = "live" | "knowledge" | "profiles" | "history" | "observability" | "settings";
+export type AppView = "live" | "knowledge" | "profiles" | "history" | "review" | "observability" | "settings";
 export type Speaker = "remote" | "self" | "system";
 
 export interface Workspace {
@@ -30,6 +30,16 @@ export interface SourceCitation {
   score: number;
 }
 
+export interface QuestionPrefetch {
+  id: string;
+  question: string;
+  status: "prefetching" | "ready" | "insufficient" | "failed";
+  evidenceCount: number;
+  retrievalMs: number;
+  citations: SourceCitation[];
+  error?: string;
+}
+
 export interface TranscriptSegment {
   id: string;
   sessionId: string;
@@ -48,7 +58,14 @@ export interface TranscriptStreamEvent {
   isFinal: boolean;
   isQuestionCandidate: boolean;
   error?: string;
-  status?: "connecting" | "capture-started" | "audio-receiving";
+  status?: "connecting" | "capture-started" | "audio-receiving" | "audio-healthy" | "device-changed" | "bridge-released";
+  audioFrames?: number;
+  audioSeconds?: number;
+}
+
+export interface CaptureStopResult {
+  outcome: "released" | "forced" | "already-exited" | "not-running";
+  message: string;
 }
 
 export interface AnswerProfile {
@@ -56,7 +73,7 @@ export interface AnswerProfile {
   workspaceId: string;
   name: string;
   language: "zh" | "en" | "bilingual";
-  duration: "30s" | "60s" | "90s";
+  duration: "15s" | "30s" | "60s" | "90s";
   style: "star" | "business" | "concise";
   additionalInstructions: string;
 }
@@ -68,7 +85,14 @@ export interface MeetingRecord {
   title: string;
   jobTitle?: string;
   jobDescription?: string;
+  scenarioContext: string;
+  companyName?: string;
   notes: string;
+  outputRequirements: string;
+  knowledgeScope: string[];
+  resumeDocumentId?: string;
+  resumeConfirmedAt?: string;
+  packetVersion: number;
   scheduledAt?: string;
   status: "draft" | "scheduled" | "in_progress" | "completed";
   createdAt: string;

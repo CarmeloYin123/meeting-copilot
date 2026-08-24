@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -108,11 +108,26 @@ impl Repository {
                   title TEXT NOT NULL,
                   job_title TEXT,
                   job_description TEXT,
+                  scenario_context TEXT NOT NULL DEFAULT '',
+                  company_name TEXT,
                   notes TEXT NOT NULL,
+                  output_requirements TEXT NOT NULL DEFAULT '',
+                  knowledge_scope_json TEXT NOT NULL DEFAULT '[]',
+                  resume_document_id TEXT,
+                  resume_confirmed_at TEXT,
+                  packet_version INTEGER NOT NULL DEFAULT 1,
                   scheduled_at TEXT,
                   status TEXT NOT NULL,
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS meeting_packet_versions (
+                  id TEXT PRIMARY KEY,
+                  meeting_id TEXT NOT NULL REFERENCES meeting_records(id) ON DELETE CASCADE,
+                  version INTEGER NOT NULL,
+                  payload_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  UNIQUE(meeting_id, version)
                 );
                 CREATE TABLE IF NOT EXISTS model_invocations (
                   id TEXT PRIMARY KEY,
@@ -135,6 +150,41 @@ impl Repository {
             )
             .map_err(|error| format!("无法初始化资料库结构：{error}"))?;
 
+        // Existing 0.1.x databases are migrated in place. Each column check keeps
+        // startup idempotent across reinstalls that reuse the same app-data directory.
+        ensure_column(
+            &connection,
+            "meeting_records",
+            "scenario_context",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        ensure_column(&connection, "meeting_records", "company_name", "TEXT")?;
+        ensure_column(
+            &connection,
+            "meeting_records",
+            "output_requirements",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        ensure_column(
+            &connection,
+            "meeting_records",
+            "knowledge_scope_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        ensure_column(&connection, "meeting_records", "resume_document_id", "TEXT")?;
+        ensure_column(
+            &connection,
+            "meeting_records",
+            "resume_confirmed_at",
+            "TEXT",
+        )?;
+        ensure_column(
+            &connection,
+            "meeting_records",
+            "packet_version",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
+
         let repository = Self {
             connection,
             vault_dir,
@@ -148,13 +198,25 @@ impl Repository {
         self.connection
             .execute(
                 "INSERT OR IGNORE INTO workspaces (id, name, kind) VALUES (?1, ?2, ?3)",
-                params!["interview", "面试准备", "interview"],
+                params!["interview", "面试会议", "interview"],
             )
             .map_err(|error| error.to_string())?;
         self.connection
             .execute(
                 "INSERT OR IGNORE INTO workspaces (id, name, kind) VALUES (?1, ?2, ?3)",
-                params!["business", "商务会议", "business"],
+                params!["business", "售前商务会议", "business"],
+            )
+            .map_err(|error| error.to_string())?;
+        self.connection
+            .execute(
+                "UPDATE workspaces SET name='面试会议' WHERE id='interview'",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+        self.connection
+            .execute(
+                "UPDATE workspaces SET name='售前商务会议' WHERE id='business'",
+                [],
             )
             .map_err(|error| error.to_string())?;
         self.connection
@@ -230,7 +292,7 @@ impl Repository {
 
     pub fn meeting_records(&self) -> Result<Vec<MeetingRecord>, String> {
         let mut statement = self.connection.prepare(
-            "SELECT id, workspace_id, kind, title, job_title, job_description, notes, scheduled_at, status, created_at, updated_at FROM meeting_records ORDER BY COALESCE(scheduled_at, updated_at) DESC",
+            "SELECT id, workspace_id, kind, title, job_title, job_description, scenario_context, company_name, notes, output_requirements, knowledge_scope_json, resume_document_id, resume_confirmed_at, packet_version, scheduled_at, status, created_at, updated_at FROM meeting_records ORDER BY COALESCE(scheduled_at, updated_at) DESC",
         ).map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([], meeting_record_from_row)
@@ -314,6 +376,12 @@ impl Repository {
     }
 
     pub fn upsert_meeting_record(&self, record: &MeetingRecord) -> Result<MeetingRecord, String> {
+        if record.title.trim().is_empty()
+            || record.scenario_context.trim().is_empty()
+            || record.notes.trim().is_empty()
+        {
+            return Err("会议必须包含主题、场景背景和备注信息。".to_owned());
+        }
         if record.kind == "interview"
             && (record.job_title.as_deref().unwrap_or("").trim().is_empty()
                 || record
@@ -326,13 +394,82 @@ impl Repository {
         {
             return Err("面试登记必须包含岗位名称、岗位 JD 和备注信息。".to_owned());
         }
+        let workspace_kind = self
+            .connection
+            .query_row(
+                "SELECT kind FROM workspaces WHERE id=?1",
+                [&record.workspace_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|_| "找不到当前会议模板。".to_owned())?;
+        if workspace_kind != record.kind {
+            return Err("会议类型与当前会议模板不一致。".to_owned());
+        }
+        let scope = record
+            .knowledge_scope
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        if scope.len() != record.knowledge_scope.len() {
+            return Err("本次知识范围中存在重复资料。".to_owned());
+        }
+        for document_id in &record.knowledge_scope {
+            let owner = self
+                .connection
+                .query_row(
+                    "SELECT workspace_id FROM documents WHERE id=?1",
+                    [document_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            if owner.as_deref() != Some(record.workspace_id.as_str()) {
+                return Err("本次知识范围包含不属于当前会议模板的资料。".to_owned());
+            }
+        }
+        if let Some(resume_id) = record
+            .resume_document_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            if !scope.contains(resume_id) {
+                return Err("已选择的简历必须同时加入本次知识范围。".to_owned());
+            }
+            if record
+                .resume_confirmed_at
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+            {
+                return Err("使用简历前必须由用户人工确认。".to_owned());
+            }
+        }
+        let knowledge_scope_json = serde_json::to_string(&record.knowledge_scope)
+            .map_err(|error| format!("无法保存本次知识范围：{error}"))?;
         self.connection.execute(
-            "INSERT INTO meeting_records (id, workspace_id, kind, title, job_title, job_description, notes, scheduled_at, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, title=excluded.title, job_title=excluded.job_title, job_description=excluded.job_description, notes=excluded.notes, scheduled_at=excluded.scheduled_at, status=excluded.status, updated_at=excluded.updated_at",
-            params![record.id, record.workspace_id, record.kind, record.title, record.job_title, record.job_description, record.notes, record.scheduled_at, record.status, record.created_at, record.updated_at],
+            "INSERT INTO meeting_records (id, workspace_id, kind, title, job_title, job_description, scenario_context, company_name, notes, output_requirements, knowledge_scope_json, resume_document_id, resume_confirmed_at, packet_version, scheduled_at, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+             ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, title=excluded.title, job_title=excluded.job_title, job_description=excluded.job_description, scenario_context=excluded.scenario_context, company_name=excluded.company_name, notes=excluded.notes, output_requirements=excluded.output_requirements, knowledge_scope_json=excluded.knowledge_scope_json, resume_document_id=excluded.resume_document_id, resume_confirmed_at=excluded.resume_confirmed_at, packet_version=meeting_records.packet_version+1, scheduled_at=excluded.scheduled_at, status=excluded.status, updated_at=excluded.updated_at",
+            params![record.id, record.workspace_id, record.kind, record.title, record.job_title, record.job_description, record.scenario_context, record.company_name, record.notes, record.output_requirements, knowledge_scope_json, record.resume_document_id, record.resume_confirmed_at, record.packet_version.max(1), record.scheduled_at, record.status, record.created_at, record.updated_at],
         ).map_err(|error| format!("无法保存会议/面试记录：{error}"))?;
-        Ok(record.clone())
+        let saved = self
+            .meeting_record(&record.id)?
+            .ok_or("会议配置保存后无法读取。")?;
+        let payload = serde_json::to_string(&saved)
+            .map_err(|error| format!("无法创建会议配置快照：{error}"))?;
+        self.connection.execute(
+            "INSERT OR REPLACE INTO meeting_packet_versions (id, meeting_id, version, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![Uuid::new_v4().to_string(), saved.id, saved.packet_version, payload, Utc::now().to_rfc3339()],
+        ).map_err(|error| format!("无法创建会议配置快照：{error}"))?;
+        Ok(saved)
+    }
+
+    pub fn delete_meeting_record(&self, id: &str) -> Result<(), String> {
+        self.connection
+            .execute("DELETE FROM meeting_records WHERE id=?1", [id])
+            .map_err(|error| format!("无法删除会议配置：{error}"))?;
+        Ok(())
     }
 
     pub fn import_file(&self, workspace_id: &str, path: &str) -> Result<KnowledgeDocument, String> {
@@ -468,7 +605,7 @@ impl Repository {
 
     pub fn meeting_record(&self, id: &str) -> Result<Option<MeetingRecord>, String> {
         self.connection.query_row(
-            "SELECT id, workspace_id, kind, title, job_title, job_description, notes, scheduled_at, status, created_at, updated_at FROM meeting_records WHERE id=?1",
+            "SELECT id, workspace_id, kind, title, job_title, job_description, scenario_context, company_name, notes, output_requirements, knowledge_scope_json, resume_document_id, resume_confirmed_at, packet_version, scheduled_at, status, created_at, updated_at FROM meeting_records WHERE id=?1",
             [id],
             meeting_record_from_row,
         ).optional().map_err(|error| error.to_string())
@@ -477,9 +614,15 @@ impl Repository {
     pub fn hybrid_search(
         &self,
         workspace_id: &str,
+        knowledge_scope: &[String],
         query: &str,
         query_vector: &[f32],
     ) -> Result<Vec<SourceCitation>, String> {
+        if knowledge_scope.is_empty() {
+            return Ok(Vec::new());
+        }
+        let scope_json = serde_json::to_string(knowledge_scope)
+            .map_err(|error| format!("无法读取本次知识范围：{error}"))?;
         let mut candidates: HashMap<String, StoredChunk> = HashMap::new();
         let phrase = format!("\"{}\"", query.replace('"', " ").replace('*', " "));
         let mut lexical = self.connection.prepare(
@@ -487,10 +630,12 @@ impl Repository {
              FROM chunks_fts
              JOIN chunks c ON c.id = chunks_fts.chunk_id
              JOIN documents d ON d.id = c.document_id
-             WHERE d.workspace_id=?1 AND d.status='ready' AND chunks_fts MATCH ?2
+             WHERE d.workspace_id=?1 AND d.status='ready'
+               AND d.id IN (SELECT value FROM json_each(?3))
+               AND chunks_fts MATCH ?2
              ORDER BY score DESC LIMIT 50",
         ).map_err(|error| error.to_string())?;
-        if let Ok(rows) = lexical.query_map(params![workspace_id, phrase], |row| {
+        if let Ok(rows) = lexical.query_map(params![workspace_id, phrase, scope_json], |row| {
             let vector_json: Option<String> = row.get(5)?;
             Ok(StoredChunk {
                 id: row.get(0)?,
@@ -513,11 +658,13 @@ impl Repository {
             .prepare(
                 "SELECT c.id, c.document_id, d.name, c.locator, c.content, c.vector_json
              FROM chunks c JOIN documents d ON d.id=c.document_id
-             WHERE d.workspace_id=?1 AND d.status='ready' AND c.vector_json IS NOT NULL",
+             WHERE d.workspace_id=?1 AND d.status='ready'
+               AND d.id IN (SELECT value FROM json_each(?2))
+               AND c.vector_json IS NOT NULL",
             )
             .map_err(|error| error.to_string())?;
         let mut vector_candidates = vectors
-            .query_map([workspace_id], |row| {
+            .query_map(params![workspace_id, scope_json], |row| {
                 let vector_json: String = row.get(5)?;
                 Ok(StoredChunk {
                     id: row.get(0)?,
@@ -598,12 +745,47 @@ fn meeting_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MeetingR
         title: row.get(3)?,
         job_title: row.get(4)?,
         job_description: row.get(5)?,
-        notes: row.get(6)?,
-        scheduled_at: row.get(7)?,
-        status: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        scenario_context: row.get(6)?,
+        company_name: row.get(7)?,
+        notes: row.get(8)?,
+        output_requirements: row.get(9)?,
+        knowledge_scope: row
+            .get::<_, String>(10)
+            .ok()
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_default(),
+        resume_document_id: row.get(11)?,
+        resume_confirmed_at: row.get(12)?,
+        packet_version: row.get(13)?,
+        scheduled_at: row.get(14)?,
+        status: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
     })
+}
+
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| error.to_string())?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    if !columns.iter().any(|value| value == column) {
+        connection
+            .execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            ))
+            .map_err(|error| format!("无法升级本地资料库字段 {column}：{error}"))?;
+    }
+    Ok(())
 }
 
 fn cosine(left: &[f32], right: &[f32]) -> f64 {
@@ -633,4 +815,135 @@ fn truncate(value: &str, max: usize) -> String {
 
 fn compact_observability_error(value: &str) -> String {
     value.chars().take(600).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_repository() -> (PathBuf, Repository) {
+        let root =
+            std::env::temp_dir().join(format!("meeting-copilot-storage-test-{}", Uuid::new_v4()));
+        let repository = Repository::open(&root, [7_u8; 32]).expect("open repository");
+        (root, repository)
+    }
+
+    fn insert_document(repository: &Repository, id: &str, workspace_id: &str, name: &str) {
+        repository.connection.execute(
+            "INSERT INTO documents (id, workspace_id, name, extension, status, segment_count, updated_at) VALUES (?1, ?2, ?3, 'MD', 'ready', 0, ?4)",
+            params![id, workspace_id, name, Utc::now().to_rfc3339()],
+        ).expect("insert document");
+    }
+
+    fn meeting(scope: Vec<String>) -> MeetingRecord {
+        MeetingRecord {
+            id: "meeting-test".to_owned(),
+            workspace_id: "interview".to_owned(),
+            kind: "interview".to_owned(),
+            title: "测试面试会议".to_owned(),
+            job_title: Some("AI 解决方案架构师".to_owned()),
+            job_description: Some("负责企业 AI 方案设计".to_owned()),
+            scenario_context: "验证本次资料范围隔离".to_owned(),
+            company_name: Some("测试公司".to_owned()),
+            notes: "只允许使用本次勾选资料".to_owned(),
+            output_requirements: "结论优先".to_owned(),
+            knowledge_scope: scope,
+            resume_document_id: None,
+            resume_confirmed_at: None,
+            packet_version: 1,
+            scheduled_at: None,
+            status: "draft".to_owned(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn meeting_packet_versions_and_scope_are_persisted() {
+        let (root, repository) = test_repository();
+        insert_document(&repository, "resume-a", "interview", "简历A.md");
+        let mut record = meeting(vec!["resume-a".to_owned()]);
+        record.resume_document_id = Some("resume-a".to_owned());
+        assert!(repository.upsert_meeting_record(&record).is_err());
+
+        record.resume_confirmed_at = Some(Utc::now().to_rfc3339());
+        let first = repository
+            .upsert_meeting_record(&record)
+            .expect("save meeting");
+        assert_eq!(first.packet_version, 1);
+        assert_eq!(first.knowledge_scope, vec!["resume-a"]);
+        let second = repository
+            .upsert_meeting_record(&first)
+            .expect("update meeting");
+        assert_eq!(second.packet_version, 2);
+        let versions: i64 = repository
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM meeting_packet_versions WHERE meeting_id=?1",
+                [&second.id],
+                |row| row.get(0),
+            )
+            .expect("count versions");
+        assert_eq!(versions, 2);
+        repository
+            .delete_meeting_record(&second.id)
+            .expect("delete meeting");
+        let versions_after_delete: i64 = repository
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM meeting_packet_versions WHERE meeting_id=?1",
+                [&second.id],
+                |row| row.get(0),
+            )
+            .expect("count versions after delete");
+        assert_eq!(versions_after_delete, 0);
+        drop(repository);
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn hybrid_search_never_crosses_selected_document_scope() {
+        let (root, repository) = test_repository();
+        insert_document(&repository, "doc-a", "interview", "范围A.md");
+        insert_document(&repository, "doc-b", "interview", "范围B.md");
+        repository
+            .replace_chunks(
+                "doc-a",
+                &[ExtractedSection {
+                    locator: "A".to_owned(),
+                    content: "智能客服架构包含接入层和知识检索层".to_owned(),
+                }],
+                &[vec![1.0, 0.0]],
+            )
+            .expect("index document A");
+        repository
+            .replace_chunks(
+                "doc-b",
+                &[ExtractedSection {
+                    locator: "B".to_owned(),
+                    content: "这是另一份受限资料".to_owned(),
+                }],
+                &[vec![0.0, 1.0]],
+            )
+            .expect("index document B");
+
+        let only_b = repository
+            .hybrid_search(
+                "interview",
+                &["doc-b".to_owned()],
+                "智能客服架构",
+                &[1.0, 0.0],
+            )
+            .expect("scoped search");
+        assert!(!only_b.is_empty());
+        assert!(only_b
+            .iter()
+            .all(|citation| citation.document_id == "doc-b"));
+        assert!(repository
+            .hybrid_search("interview", &[], "智能客服架构", &[1.0, 0.0])
+            .expect("empty scope")
+            .is_empty());
+        drop(repository);
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
 }

@@ -17,6 +17,10 @@ struct AudioFrame: Encodable {
     let capturedAt: String
 }
 
+struct BridgeCommand: Decodable {
+    let type: String
+}
+
 @available(macOS 14.0, *)
 final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     private let isoFormatter = ISO8601DateFormatter()
@@ -81,6 +85,10 @@ final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
         write(["type": "capture_status", "source": "system", "status": "capture-started"])
     }
 
+    func announceCaptureReleased() {
+        write(["type": "capture_status", "source": "system", "status": "bridge-released"])
+    }
+
     private func write<T: Encodable>(_ value: T) {
         guard let data = try? JSONEncoder().encode(value),
               let line = String(data: data, encoding: .utf8) else { return }
@@ -90,7 +98,7 @@ final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
 }
 
 @available(macOS 14.0, *)
-final class MicrophoneCapture {
+final class MicrophoneCapture: @unchecked Sendable {
     private let engine = AVAudioEngine()
     private let isoFormatter = ISO8601DateFormatter()
     private let outputFormat = AVAudioFormat(
@@ -103,6 +111,7 @@ final class MicrophoneCapture {
     private var sourceSampleRate: Double = 0
     private var sourceChannelCount: AVAudioChannelCount = 0
     private var reportedConversionError = false
+    private var deviceChangeObserver: NSObjectProtocol?
 
     func start() throws {
         let input = engine.inputNode
@@ -123,6 +132,13 @@ final class MicrophoneCapture {
         }
         engine.prepare()
         try engine.start()
+        deviceChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            self?.write(["type": "capture_status", "source": "microphone", "status": "device-changed"])
+        }
         write(["type": "capture_status", "source": "microphone", "status": "capture-started"])
     }
 
@@ -130,6 +146,10 @@ final class MicrophoneCapture {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         converter = nil
+        if let deviceChangeObserver {
+            NotificationCenter.default.removeObserver(deviceChangeObserver)
+            self.deviceChangeObserver = nil
+        }
     }
 
     private func emitConvertedFrame(_ buffer: AVAudioPCMBuffer) {
@@ -203,6 +223,12 @@ final class CaptureSession {
         output.announceCaptureStarted()
     }
 
+    func stop() async throws {
+        microphone.stop()
+        try await stream.stopCapture()
+        output.announceCaptureReleased()
+    }
+
     deinit {
         microphone.stop()
     }
@@ -227,6 +253,21 @@ func startCapture() async throws -> CaptureSession {
     let session = CaptureSession(output: output, stream: stream, microphone: MicrophoneCapture())
     try await session.start()
     return session
+}
+
+@available(macOS 14.0, *)
+func waitForStopCommand() async {
+    _ = await Task.detached(priority: .userInitiated) {
+        while let line = readLine() {
+            guard let data = line.data(using: .utf8),
+                  let command = try? JSONDecoder().decode(BridgeCommand.self, from: data) else {
+                continue
+            }
+            if command.type == "stop" {
+                return
+            }
+        }
+    }.value
 }
 
 func checkPermissions() {
@@ -260,10 +301,11 @@ if CommandLine.arguments.contains("--check-permissions") {
 } else if #available(macOS 14.0, *) {
     do {
         let session = try await startCapture()
-        while !Task.isCancelled {
-            try await Task.sleep(nanoseconds: 3_600_000_000_000)
-        }
-        _ = session
+        // The Rust host writes a stop command before it exits.  This explicit
+        // lifecycle lets ScreenCaptureKit release the system sharing session
+        // rather than relying on process termination to clean it up.
+        await waitForStopCommand()
+        try await session.stop()
     } catch {
         let error = ["type": "capture_error", "message": error.localizedDescription]
         if let data = try? JSONSerialization.data(withJSONObject: error), let text = String(data: data, encoding: .utf8) { print(text) }
